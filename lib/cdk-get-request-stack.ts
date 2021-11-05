@@ -1,16 +1,27 @@
 import { CfnOutput, Construct, Duration, RemovalPolicy, Stack, StackProps } from '@aws-cdk/core';
 import { HttpApi, HttpRouteKey, HttpRoute } from '@aws-cdk/aws-apigatewayv2';
 import { HttpProxyIntegration } from '@aws-cdk/aws-apigatewayv2-integrations';
-import { LogLevel, Pass, StateMachine, StateMachineType } from '@aws-cdk/aws-stepfunctions';
+import { JsonPath, LogLevel, Pass, StateMachine, StateMachineType } from '@aws-cdk/aws-stepfunctions';
 import { LogGroup } from '@aws-cdk/aws-logs';
-import { CallApiGatewayHttpApiEndpoint, HttpMethod } from '@aws-cdk/aws-stepfunctions-tasks';
+import { CallApiGatewayHttpApiEndpoint, DynamoAttributeValue, DynamoPutItem, HttpMethod } from '@aws-cdk/aws-stepfunctions-tasks';
+import { AttributeType, BillingMode ,Table } from '@aws-cdk/aws-dynamodb';
 
 export class CdkGetRequestStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
+    // Create DynamoDB table
+    const ddbTable = new Table(this, 'Table', {
+      partitionKey: {
+        name: 'timest',
+        type: AttributeType.STRING
+      },
+      removalPolicy: RemovalPolicy.DESTROY,
+      billingMode: BillingMode.PAY_PER_REQUEST
+    });
+
     // Create API Gateway
-    const apigw = new HttpApi(this, 'apigw', {
+    const apigw = new HttpApi(this, 'ProxyApiGw', {
       createDefaultStage: true
     });
 
@@ -30,13 +41,26 @@ export class CdkGetRequestStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY
     });
 
+    // Create DynamoDB PutItem step with IP and timestamp
+    const ddbPutStep = new DynamoPutItem(this, 'DynamoPutItem', {
+      table: ddbTable,
+      item: {
+        ip: DynamoAttributeValue.fromString(JsonPath.stringAt('$')),
+        timest: DynamoAttributeValue.fromString(JsonPath.stringAt('$$.Execution.StartTime')),
+        //context: DynamoAttributeValue.fromString(JsonPath.stringAt('$$'))
+      }
+    });
+
     // Create GET request
-    const sfDefinition = new CallApiGatewayHttpApiEndpoint(this, 'StateMachine', {
+    const httpGetStep = new CallApiGatewayHttpApiEndpoint(this, 'StateMachine', {
       apiId: apigw.httpApiId,
       apiStack: Stack.of(apigw),
       method: HttpMethod.GET,
       outputPath: "$.ResponseBody"
     });
+
+    // Create Step Function definition
+    const sfDefinition = httpGetStep.next(ddbPutStep);
 
     // Create express state machine with logging enabled
     const stateMachine = new StateMachine(this, 'HTTPStateMachine', {
@@ -50,7 +74,14 @@ export class CdkGetRequestStack extends Stack {
       },
     });      
 
+    // Grant DynamoDB read/write permissions to the state machine
+    ddbTable.grantReadWriteData(stateMachine);
+
     // Print the URL of API Gateway
     new CfnOutput(this, 'API URL', { value: apigw.url ?? 'deployment error' });
+
+    // Print the ARN of Step Function
+    new CfnOutput(this, 'StepFunction ARN', { value: stateMachine.stateMachineArn ?? 'deployment error' });
+
   }
 }

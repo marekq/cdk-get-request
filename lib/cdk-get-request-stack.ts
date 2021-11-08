@@ -25,11 +25,11 @@ export class CdkGetRequestStack extends Stack {
       createDefaultStage: true
     });
 
-    // Create HTTP route to IP API
-    const route = new HttpRoute(this, 'route1', {
+    // Create HTTP route to Weather API
+    const route = new HttpRoute(this, 'WeatherRoute', {
       httpApi: apigw,
       integration: new HttpProxyIntegration({
-        url: "https://api.ipify.org",
+        url: "https://wttr.in/Wassenaar?format=3",
         method: HttpMethod.GET
       }),
       routeKey: HttpRouteKey.with("/", HttpMethod.GET),
@@ -37,30 +37,49 @@ export class CdkGetRequestStack extends Stack {
 
     // Create Step Function CloudWatch Logs
     const SFlogGroup = new LogGroup(this, 'SFlogGroup', {
-      logGroupName: '/aws/lambda/cdk-get-request-stack-StateMachine-1',
       removalPolicy: RemovalPolicy.DESTROY
     });
 
-    // Create DynamoDB PutItem step with IP and timestamp
-    const ddbPutStep = new DynamoPutItem(this, 'DynamoPutItem', {
+    // Create DynamoDB PutItem step with weather data and timestamp
+    const ddbPutStep = new DynamoPutItem(this, 'PutItemToDynamo', {
       table: ddbTable,
       item: {
-        ip: DynamoAttributeValue.fromString(JsonPath.stringAt('$')),
-        timest: DynamoAttributeValue.fromString(JsonPath.stringAt('$$.Execution.StartTime')),
-        //context: DynamoAttributeValue.fromString(JsonPath.stringAt('$$'))
-      }
+        weather: DynamoAttributeValue.fromString(JsonPath.stringAt('$.weather')),
+        timest: DynamoAttributeValue.fromString(JsonPath.stringAt('$.event_date')),
+      },
+      resultPath: '$.ddb'
     });
 
     // Create GET request
-    const httpGetStep = new CallApiGatewayHttpApiEndpoint(this, 'StateMachine', {
+    const httpGetStep = new CallApiGatewayHttpApiEndpoint(this, 'GetHTTP', {
       apiId: apigw.httpApiId,
       apiStack: Stack.of(apigw),
       method: HttpMethod.GET,
-      outputPath: "$.ResponseBody"
+      resultPath: '$.http',
+    });
+
+    // Filter out weather data, event date and DynamoDB status from the event
+    const filterStep = new Pass(this, 'FilterResponse', {
+      parameters: {
+        "weather.$": "$.http.ResponseBody",
+        "event_date.$": "$.http.Headers.Date[0]"
+      }
+    });
+
+    // Create Final Step
+    const finalStep = new Pass(this, 'FinalStep', {
+      parameters: {
+        "weather.$": "$.weather",
+        "event_date.$": "$.event_date",
+        "ddb_status.$": "$.ddb.SdkHttpMetadata.HttpStatusCode"
+      }
     });
 
     // Create Step Function definition
-    const sfDefinition = httpGetStep.next(ddbPutStep);
+    const sfDefinition = httpGetStep
+    .next(filterStep)
+    .next(ddbPutStep)
+    .next(finalStep);
 
     // Create express state machine with logging enabled
     const stateMachine = new StateMachine(this, 'HTTPStateMachine', {

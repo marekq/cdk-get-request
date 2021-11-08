@@ -5,6 +5,8 @@ import { JsonPath, LogLevel, Pass, StateMachine, StateMachineType } from '@aws-c
 import { LogGroup } from '@aws-cdk/aws-logs';
 import { CallApiGatewayHttpApiEndpoint, DynamoAttributeValue, DynamoPutItem, HttpMethod } from '@aws-cdk/aws-stepfunctions-tasks';
 import { AttributeType, BillingMode ,Table } from '@aws-cdk/aws-dynamodb';
+import { Rule, Schedule } from '@aws-cdk/aws-events';
+import { SfnStateMachine } from "@aws-cdk/aws-events-targets"; 
 
 export class CdkGetRequestStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -59,7 +61,7 @@ export class CdkGetRequestStack extends Stack {
     });
 
     // Filter out weather data, event date and DynamoDB status from the event
-    const filterStep = new Pass(this, 'FilterResponse', {
+    const filterStep = new Pass(this, 'filterStep', {
       parameters: {
         "weather.$": "$.http.ResponseBody",
         "event_date.$": "$.http.Headers.Date[0]"
@@ -91,8 +93,16 @@ export class CdkGetRequestStack extends Stack {
         destination: SFlogGroup,
         level: LogLevel.ALL
       },
-    });      
-
+    });    
+    
+    // Create hourly EventBridge trigger to start State Machine
+    new Rule(this, "HourlyScheduleRule", {
+      schedule: Schedule.rate(Duration.hours(1)),
+      enabled: true,
+      targets: [ 
+        new SfnStateMachine(stateMachine) 
+      ]
+    });
     // Grant DynamoDB read/write permissions to the state machine
     ddbTable.grantReadWriteData(stateMachine);
 
